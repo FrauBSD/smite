@@ -1,4 +1,4 @@
-[//]: # ($FrauBSD: smite/README.md 2018-07-04 00:31:26 +0000 freebsdfrau $)
+[//]: # ($FrauBSD: smite/README.md 2018-07-04 03:14:44 +0000 freebsdfrau $)
 
 # smite
 
@@ -32,11 +32,11 @@ This will ensure the FrauBSD keyword is expanded/updated for each commit.
 
 ### On FreeBSD
 
-> `#service syslogd reload`
+> `# service syslogd reload`
 
-> `#sysrc smite_enable=YES`
+> `# sysrc smite_enable=YES`
 
-> `#cd /usr/local/etc`
+> `# cd /usr/local/etc`
 
 ### Then
 
