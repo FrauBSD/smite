@@ -1,0 +1,137 @@
+# vim: set filetype=sh :: Vi/ViM
+#---------------------------------------------------------------------
+# smite.conf -- Configuration file for the hot spare daemon, smite.
+#---------------------------------------------------------------------
+
+#---------------------------------------------------------------------
+# General:
+#---------------------------------------------------------------------
+# Add the email address of the administrator which should receive error
+# messages, notices, and system takeover announcements.
+#---------------------------------------------------------------------
+
+#ADMIN=					# admin email address
+
+#---------------------------------------------------------------------
+# Pre-conditions before running this configuration
+#---------------------------------------------------------------------
+
+msg "config: checking for mysql"
+type mysql > /dev/null 2>&1 || die "mysql does not exist on this system"
+
+#---------------------------------------------------------------------
+# Enter the primary ethernet device name. This ethernet device will be
+# aliased during a failover condition. Can be left empty if only one
+# active (non-loopback) network interface is active.
+#---------------------------------------------------------------------
+
+#DEVICE=				# primary ethernet device
+
+#---------------------------------------------------------------------
+# Monitored Process:
+#---------------------------------------------------------------------
+# The following IP address is the IP address for the monitored process
+# in the master server and hot spare configuration. It can be an IP address
+# that is shared and portable between the master server and the hot
+# spare server or it can be the master server's own IP address for its
+# ethernet device.
+#
+# WARNING: If you use the master server's own IP address for smite, the
+# server will be unresponsive after the hot spare takes over the address.
+# This is the case for both automated failover and for user-initiated
+# failover. To access the server after a failover has taken place, you
+# will need to use a direct connect console or IPMI connection as the
+# host will not have an IP address associated with its ethernet device.
+#
+# If netmask is left empty, the network mask of the primary ethernet
+# device is used. If the primary network device is not configured smite
+# will refuse to start, requiring you to set netmask below.
+#---------------------------------------------------------------------
+
+###
+### Settings for VIP management
+###
+
+#IPADDR=
+#NETMASK=
+
+###
+### Settings for AWS Elastic IP (EIP) management
+###
+
+#AWS_EIP_ALLOCATION_ID=eipalloc-XXXXXXXXXXXXXXXXX
+
+#AWS_ACCESS_KEY_ID=
+#AWS_ACCESS_KEY_SECRET=
+#AWS_DEFAULT_REGION=
+
+#---------------------------------------------------------------------
+# The next section is the configuration for the monitored process both
+# locally on the master server and remotely by the hot spare server.
+# The text IPADDR is globally replaced with $IPADDR before execution.
+#
+# The test command execution, whether local or remote, must return
+# one of the following:
+#
+#	exit code	0 for success, any other integer for failure
+#	string		matches for sucess, does not match for failure
+#---------------------------------------------------------------------
+
+LOCAL_TEST_CMD="mysql -uroot -pPASSWORD -e 'show databases;'"
+REMOTE_TEST_CMD="mysql -uroot -pPASSWORD -hIPADDR -e 'show databases;'"
+
+#---------------------------------------------------------------------
+# If required by the hot spare system, specify a command that must be
+# executed before/after any failover. This command can be something
+# simple like:
+#
+#	mysql -e "stop slave;"
+#
+# If either command fails, it will not prevent failover from occuring.
+# You will receive an email to the $ADMIN address supplied.
+#---------------------------------------------------------------------
+
+PREIP_CMD="mysql -uroot -pPASSWORD -e 'stop slave;'"
+					# command run during failover
+					# before IP updates
+POSTIP_CMD=""
+					# command run during failover
+					# after IP updates
+
+#---------------------------------------------------------------------
+# You must specify how many failures in a row must occur before "the"
+# hot spare will takeover for the master. Also, you need to specify the
+# time in seconds between each test. If you specify 3 failures before
+# executing a failover and you specify a 5 second test interval, failover
+# will not occur until 15 seconds has passed.
+#---------------------------------------------------------------------
+
+#RETRIES=3				# number of retries before failover
+#INTERVAL=3				# test every # seconds
+
+#---------------------------------------------------------------------
+# Some tests will hang if the server is unresponsive. You can specify the
+# timeout for the test command to respond. This value should be
+# slightly greater than the time for the process to respond during
+# peak traffic. If you specify this value too small, you may have
+# false positives during peak traffic times and cause unnecessary
+# failovers to occur.
+#---------------------------------------------------------------------
+
+#TIMEOUT=3				# timeout for test to complete
+
+#---------------------------------------------------------------------
+# You must also specify a network test IP address or addresses that
+# will respond to a ping test successfully. This is used to verify
+# that there are no local network issues that may have caused a failure.
+# This can only be left empty if your machine has a ping-able default
+# gateway or (failing that) a ping-able primary nameserver (pulled from
+# resolv.conf(5)).
+#---------------------------------------------------------------------
+
+#TESTADDR=				# if failure, test this with ping
+					# to make sure network is okay
+
+#---------------------------------------------------------------------
+# END
+#---------------------------------------------------------------------
