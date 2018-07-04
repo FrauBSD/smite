@@ -1,0 +1,8 @@
+/var/log/smite.log {
+        create 644 root root
+        notifempty
+	daily
+        rotate 7
+        missingok
+        compress
+}

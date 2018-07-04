@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# smite - this script starts and stops the smite daemon
+#
+# chkconfig:   2345 99 10
+# description:  a daemon out to destroy downtime ... no ... \
+#               a crusader that champions uptime ... hmmm
+# processname: smite
+# config:      /etc/smite.conf
+# pidfile:     /var/run/smite.pid
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+smite=/usr/local/bin/smite
+prog=${smite##*/}
+
+conf=/etc/smite.conf
+
+lockfile="/var/lock/subsys/$prog"
+pidfile="/var/run/$prog.pid"
+
+args="-f $conf"
+
+start()
+{
+	[ -x $smite ] || exit 5
+	[ -f $conf ] || exit 6
+	echo -n "Starting $prog: "
+	$smite $args <&- >&- 2>/var/run/$prog.stderr &
+	if [ $? -eq 0 ]; then
+		echo success
+	else
+		echo failed
+	fi
+	echo
+}
+
+stop()
+{
+	echo -n "Stopping $prog: "
+	kill $( cat "$pidfile" )
+	if [ $? -eq 0 ]; then
+		echo killed
+	else
+		echo failed
+	fi
+	echo
+}
+
+case "$1" in
+start|stop) $1 ;;
+debug)
+	args="$args -d"
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|debug}"
+	exit 2
+esac

@@ -1,0 +1,85 @@
+#!/bin/sh
+#
+# Copyright (c) 2018 Devin Teske
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+# $FrauBSD: smite/rc.d/smite 2018-07-04 00:04:48 +0000 freebsdfrau $
+#
+
+# PROVIDE: smite
+# REQUIRE: DAEMON LOGIN FILESYSTEMS NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="smite"
+rcvar=smite_enable
+
+load_rc_config $name
+
+: ${smite_enable=NO}
+: ${smite_flags=}
+: ${smite_config=/usr/local/etc/$name.conf}
+: ${smite_pidfile=/var/run/$name.pid}
+
+command="/usr/local/bin/$name"
+command_interpreter="/bin/sh"
+command_args="-f $smite_config &"
+pidfile="/var/run/$name.pid"
+extra_commands="debug failover kill"
+
+debug_cmd=smite_debug
+failover_cmd="$command -S"
+kill_cmd=smite_kill
+
+required_files="$smite_config"
+
+smite_debug()
+{
+	command_args="-d $command_args"
+	run_rc_command start
+}
+
+smite_kill()
+{
+	local pid to_kill=
+
+	# Get pid from pidfile and make sure it is running as command
+	pid=$( check_pidfile $pidfile $command $command_interpreter )
+	if [ ! "$pid" ]; then
+		echo "$name not running? (check $pidfile)."
+		return 1
+	fi
+	to_kill="$to_kill $pid"
+
+	# Get pid of subshell running sigsock and nc(1) child process
+	if pid=$( pgrep -P $pid ${command_interpreter##*/} ); then
+		to_kill="$to_kill $pid"
+		pid=$( pgrep -P $pid nc ) && to_kill="$to_kill $pid"
+	fi
+
+	kill -9 $to_kill && echo "Killed."
+}
+
+run_rc_command "$1"
