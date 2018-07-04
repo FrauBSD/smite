@@ -30,7 +30,7 @@
 # $Title: HA daemon for active/passive IP sharing $
 # $Copyright: 2013-2018 Smule, Inc. All rights reserved. $
 # $Copyright: 2018 The FrauBSD Project. All rights reserved. $
-# $FrauBSD: smite/smite 2018-07-04 00:13:44 +0000 freebsdfrau $
+# $FrauBSD: smite/smite 2018-07-04 06:31:02 +0000 freebsdfrau $
 #
 ############################################################ INFORMATION
 #
@@ -110,7 +110,7 @@ pgm="${0##*/}" # Program basename
 #
 # Program version
 #
-VERSION='$Version: 4.2.0 $'
+VERSION='$Version: 4.2.1 $'
 
 #
 # Global exit status
@@ -295,7 +295,7 @@ esac
 #
 chkip()
 {
-	local funcname=ckip
+	local funcname=chkip
 	local ip
 	for ip in $*; do
 		msg "%s: checking %s" "$funcname" "$ip"
