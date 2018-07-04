@@ -1,4 +1,4 @@
-[//]: # ($FrauBSD: smite/README.md 2018-07-04 00:29:08 +0000 freebsdfrau $)
+[//]: # ($FrauBSD: smite/README.md 2018-07-04 00:30:04 +0000 freebsdfrau $)
 
 # smite
 
@@ -22,19 +22,19 @@ This will ensure the FrauBSD keyword is expanded/updated for each commit.
 
 # After install (as root)
 
-## On Linux
+### On Linux
 
 > `# service rsyslog restart`
 > `# chkconfig smite on`
 > `# cd /etc`
 
-## On FreeBSD
+### On FreeBSD
 
 > `#service syslogd reload`
 > `#sysrc smite_enable=YES`
 > `#cd /usr/local/etc`
 
-## Then
+### Then
 
 > Copy one of `smite.conf.*` to `smite.conf`
 > Edit `smite.conf`
