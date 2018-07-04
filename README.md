@@ -1,6 +1,6 @@
-[//]: # ($FrauBSD: smite/README.md 2018-07-04 03:14:44 +0000 freebsdfrau $)
+[//]: # ($FrauBSD: smite/README.md 2018-07-04 06:43:42 +0000 freebsdfrau $)
 
-# smite
+# Welcome to [FrauBSD.org/smite](https://fraubsd.org/smite)!
 
 HA daemon for active/passive IP sharing
 
