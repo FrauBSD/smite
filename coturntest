@@ -1,0 +1,122 @@
+#!/bin/sh
+############################################################ IDENT(1)
+#
+# $Title: smite test for coturn $
+# $Copyright: 2018 Smule, Inc. All rights reserved. $
+# $Copyright: 2018 The FrauBSD Project. All rights reserved. $
+# $FrauBSD: smite/coturntest 2018-07-04 00:19:21 +0000 freebsdfrau $
+#
+############################################################ CONFIGURATION
+
+#
+# Daemon
+#
+DAEMON=turnserver
+
+#
+# TCP port
+#
+PORT=3478
+
+############################################################ GLOBALS
+
+#
+# OS Glue
+#
+: ${UNAME_s:=$( uname -s )}
+
+############################################################ FUNCTIONS
+
+# check_local daemon port
+#
+# Verify local TCP/IP port is open and held by daemon.
+#
+case "$UNAME_s" in
+FreeBSD)
+check_local()
+{
+	local daemon="$1" port="$2"
+	sockstat -4Ptcp -p "$port" | awk -v daemon="$daemon" -v port="$port" '
+		BEGIN{ getline }
+		$2 != daemon || $6 ~ /^127\./ { next }
+		sub(/.*:/, "", $6) && $6 == port { exit found = 1 }
+		END{ exit !found }
+	' # END-QUOTE
+}
+;;
+*) # Linux
+check_local()
+{
+	local daemon="$1" port="$2"
+	lsof -nPi4 +c0 | awk -v daemon="$daemon" -v port="$port" '
+		BEGIN { getline }
+		$1 != daemon || $8 != "TCP" || $9 ~ /^127\./ { next }
+		sub(/.*:/, "", $9) && $9 == port { exit found = 1 }
+		END{ exit !found }
+	' # END-QUOTE
+}
+esac
+
+# check_remote remote port
+#
+# Verify remote TCP/IP port access.
+#
+check_remote()
+{
+	local remote="$1" port="$2"
+	nc -nz "$remote" "$port" > /dev/null 2>&1
+}
+
+# promote daemon port
+#
+# Bounce service if machine has IP address not being used by daemon, indicating
+# an IP address/alias has recently been applied.
+#
+case "$UNAME_s" in
+FreeBSD)
+promote()
+{
+	local daemon="$1" port="$2"
+	sockstat -4Ptcp -p "$port" | awk -v daemon="$daemon" -v port="$port" '
+		BEGIN {
+			while ((cmd = "ifconfig") | getline)
+				if ($1 == "inet") ips[$2] = 1
+			close(cmd)
+		}
+		$2 != daemon || !match($6, ":"port"$") { next }
+		{ ips[substr($6, 1, RSTART - 1)] = 0 }
+		END { for (ip in ips) if (ips[ip]) exit 1 }
+	' || service "$daemon" restart || service "$daemon" start
+}
+;;
+*) # Linux
+promote()
+{
+	local daemon="$1" port="$2"
+	lsof -nPi4 +c0 | awk -v daemon="$daemon" -v port="$port" '
+		BEGIN {
+			while ((cmd = "ifconfig") | getline)
+				if ($1 == "inet") ips[substr($2, 6)] = 1
+			close(cmd)
+		}
+		$1 != daemon || $8 != "TCP" || !match($9, ":"port"$") { next }
+		{ ips[substr($9, 1, RSTART - 1)] = 0 }
+		END { for (ip in ips) if (ips[ip]) exit 1 }
+	' || service "$daemon" restart || service "$daemon" start
+}
+esac
+
+############################################################ MAIN
+
+case "$1" in
+stop) # Promote slave to master
+	promote "$DAEMON" "$PORT" ;;
+"") # Local coturn test
+	check_local "$DAEMON" "$PORT" ;;
+*) # Remote coturn test
+	check_remote "$1" "$PORT"
+esac
+
+################################################################################
+# END
+################################################################################
