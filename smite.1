@@ -1,0 +1,96 @@
+.\" Copyright (c) 2018 Devin Teske <dteske@FreeBSD.org>
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.\" $FrauBSD: smite/smite.1 2018-07-04 00:19:51 +0000 freebsdfrau $
+.\"
+.Dd July 3, 2018
+.Dt SMITE 1
+.Os
+.Sh NAME
+.Nm smite
+.Nd HA daemon for active/passive IP sharing
+.Sh SYNOPSIS
+.Nm
+.Op Fl dhnS?
+.Op Fl f Ar conf
+.Op Ar status
+.Sh DESCRIPTION
+The
+.Nm
+utility provides an IP failover daemon for high-traffic software based on
+the same principle of a construction worker's sledgehammer,
+swing heavy and swing hard.
+Similar in function as a load balancer's virtual IP address
+.Pq VIP
+design,
+.Nm
+uses a floating IP address that all clients reference for connections.
+When the master server fails,
+the VIP is transferred to a hot spare server to continue serving requests.
+.Pp
+.Nm
+is installed on the hot spare server.
+A remote command check determines if a failover condition has been met
+and initiates the transfer of either a VIP or Amazon EC2 Elastic IP
+.Pq EIP .
+.Pp
+When given a single argument of
+.Ql Li status ,
+displays whether the system is currently acting as a master or spare.
+.Pp
+Available options:
+.Bl -tag -width ".Fl f Ar conf"
+.It Fl d
+Turn on debug mode to log more to
+.Ql Li /var/log/smite.log .
+Specify again to enable logging to console.
+.It Fl f Ar conf
+Configuration file.
+Default
+.Ql Li /usr/local/etc/smite.conf .
+.It Fl h
+Print help menu.
+.It Fl n
+Prevent mail from being sent
+.Pq for testing .
+.It Fl S
+Signal the server to failover and exit.
+.It Fl V
+Print
+.Nm
+version on stdout and exit.
+.It Fl ?
+Print help menu.
+.El
+.Sh HISTORY
+The
+.Nm
+utility was first developed in 2013 at Smule,
+Inc.
+.Pp
+Added to ports circa
+.Fx 11.2 .
+.Sh AUTHORS
+.An Devin Teske Aq Mt dteske@FreeBSD.org
+.An Parker Lee Ranney TTEE
