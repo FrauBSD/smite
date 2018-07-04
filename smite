@@ -1,0 +1,1140 @@
+#!/bin/sh
+#-
+# Copyright (c) 2013-2016 Parker Lee Ranney TTEE
+# Copyright (c) 2018 Devin Teske
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+############################################################ IDENT(1)
+#
+# $Title: HA daemon for active/passive IP sharing $
+# $Copyright: 2013-2018 Smule, Inc. All rights reserved. $
+# $Copyright: 2018 The FrauBSD Project. All rights reserved. $
+# $FrauBSD: smite/smite 2018-07-04 00:13:44 +0000 freebsdfrau $
+#
+############################################################ INFORMATION
+#
+# smite -- Daemon to crontol master/hot-spare using shared IP address
+# --------------------------------------------------------------------
+# External dependencies:
+# 	arping		hostname	netstat		/usr/sbin/sendmail
+# 	awk		ifconfig	ping		sleep
+# 	cat		kill*		printf*		timeout
+# 	ethtool**	logger		rm		uname
+# 	grep		nc		route
+# One of the following:
+# 	curl		fetch		wget
+# Optional:
+# 	aws
+#
+# * Built-in to /bin/sh on some platforms
+# ** Only required on Linux-based platforms
+# --------------------------------------------------------------------
+# History:
+# 	20180703: v4.2: dteske: initial public release
+#	20180629: v4.0: dteske: rewrite to support FreeBSD and AWS
+#	20160513: v3.2: parker: no -s; only use -S
+#	20160513: v3.1: parker: fix netmask in ifconfig alias command
+#	20150420: v3.0: parker: gratuitous arp addition
+#	20131009: v2.1: parker: removed backup control
+#	20130920: v2.0: parker: added backup control
+#	20130912: v1.3: parker: tuning the timeout and retry counters
+#	20130904: v1.2: parker: fixed issues with one smite instance
+#		monitoring multiple ports on a set of servers
+#	20130604: v1.1: parker: switched to using signals between hosts
+#	20130507: v1.0: parker: initial writing
+#
+############################################################ CONFIGURATION
+
+#
+# FreeBSD service(8) uses a restrictive PATH of /sbin:/bin:/usr/sbin:/usr/bin
+#
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+#
+# Timeout for flap prevention (seconds)
+#
+FLAP=30
+
+#
+# logger(1) priority
+#
+PRI=local6.err
+
+#
+# Logfile as configured in syslog.conf(5) for above logger(1) priority
+#
+LOGFILE=/var/log/smite.log
+
+#
+# Configuration file defaults
+#
+ADMIN=				# default admin email for error
+DEVICE=				# default primary ethernet device
+INTERVAL=3			# test interval seconds
+IPADDR=				# IP address of master
+LOCAL_TEST_CMD=			# local test cmd for master
+NETMASK=			# netmask of $IPADDR for master
+POSTIP_CMD=			# cmd to execute after promotion
+PREIP_CMD=			# cmd to execute before promotion
+REMOTE_TEST_CMD=		# remote test cmd for hot spare
+RETRIES=3			# default number of retries
+SIGPORT=700			# default signal socket
+TESTADDR=			# test to ensure network is okay
+TIMEOUT=3			# test timeout
+
+############################################################ GLOBALS
+
+pgm="${0##*/}" # Program basename
+
+#
+# Program version
+#
+VERSION='$Version: 4.2.0 $'
+
+#
+# Global exit status
+#
+SUCCESS=0
+FAILURE=1
+
+#
+# AWS API
+#
+AWS_API_INSTANCE_ID=http://instance-data/latest/meta-data/instance-id
+AWS_API_LOCAL_HOSTNAME=http://instance-data/latest/meta-data/local-hostname
+
+#
+# Environment
+#
+: ${HOSTNAME:=$( hostname )}
+: ${UNAME_s:=$( uname -s )}
+
+#
+# Defaults
+#
+case "$UNAME_s" in
+FreeBSD)
+	: ${DEFAULT_CONF:=/usr/local/etc/$pgm.conf}
+	;;
+*) # Linux
+	: ${DEFAULT_CONF:=/etc/$pgm.conf}
+esac
+
+#
+# Command-line options
+#
+CONF="$DEFAULT_CONF"		# -f conf
+DEBUG=				# -d
+NOMAIL=				# -n
+
+#
+# Error logging
+#
+SENDMAIL="/usr/sbin/sendmail -t"
+
+#
+# Miscellaneous
+#
+CHILD=				# signal socket process ID
+PIDFILE="/var/run/$pgm.pid"	# PID file
+RCNT=1				# number of failures (<= retries)
+SIGMASK=1			# mask signals for sensitive code
+SIGRECV=0			# 1 for SIGUSR1 and 2 for SIGUSR2
+TAG="$pgm[$$]:"			# logger tag
+THROTTLE=0			# mail throttle
+
+#
+# ASCII separator
+#
+SEPARATOR=$( awk 'BEGIN {
+	sep = sprintf("%*s", 50, ""); gsub(/ /, "=", sep); printf "%s\n", sep
+}' )
+
+############################################################ FUNCTIONS
+
+# usage [text]
+#
+# Print the usage of this script with optional error message and exit.
+#
+usage()
+{
+	local fmt="\t%-9s %s\n"
+
+	exec >&2
+	[ "$1" ] && printf "%s: Error: %s\n" "$pgm" "$1"
+	printf "Usage: %s [-dhnS?] [-f conf] [status]\n" "$pgm"
+	printf "Options:\n"
+	printf "$fmt" "-d" "Turn on debug mode to log more to \`$LOGFILE'."
+	printf "$fmt" "" "Specify again to enable logging to console."
+	printf "$fmt" "-f conf" "Confguration file. Default \`$DEFAULT_CONF'."
+	printf "$fmt" "-h" "Print this help menu."
+	printf "$fmt" "-n" "Prevent mail from being sent (for testing)."
+	printf "$fmt" "-S" "Signal the server to failover and exit $pgm."
+	printf "$fmt" "-V" "Print $pgm version on stdout and exit."
+	printf "$fmt" "-?" "Print this help menu."
+	printf "NOTE:\n"
+	printf "\tIt is best to run any manual failover from the hot spare.\n"
+	printf "\tBy doing so, you will save downtime compared to running\n"
+	printf "\tmanual failover from the master server.\n"
+
+	exit $FAILURE
+}
+
+# err [-em] format [args ...]
+#
+# Log error message text. Uses printf syntax.
+# Options:
+# 	-c   Also send to console.
+# 	-m   Also send to mail.
+#
+err()
+{
+	local OPTIND=1 OPTARG flag
+	local tocons= tomail=
+
+	# If debug is >1 always show on console
+	[ ${DEBUG:-0} -lt 2 ] || tocons=1
+
+	while getopts cm flag; do
+		case "$flag" in
+		c) tocons=1 ;;
+		m) tomail=1 ;;
+		esac
+	done
+	shift $(( $OPTIND - 1 ))
+
+	local fmt="$1" msg
+	shift 1 # fmt
+	msg=$( printf "$fmt\n" "$@" )
+
+	logger -p "$PRI" -t "$TAG" "$msg"
+	[ "$tocons" ] && printf "%s: $fmt\n" "$TAG" "$@"
+	if [ "$tomail" ]; then
+		local mailout="$SENDMAIL" subject
+		subject=$( printf "%s: %s: %s\n" "$HOSTNAME" "$TAG" "$msg" |
+			awk 'BEGIN { getline; print; exit }' )
+		[ "$NOMAIL" ] && mailout=cat
+		$mailout <<-EOF
+		${NOMAIL:+$SEPARATOR
+		}From: $ADMIN
+		To: $ADMIN
+		Content-Type: text/plain
+		MIME-Version: 1.0
+		Subject: $subject
+
+		$msg${NOMAIL:+
+		$SEPARATOR}
+		EOF
+	fi
+
+	return $SUCCESS
+}
+
+# die format [args ...]
+#
+# Display a message on the console, send mail, and exit with error status.
+#
+die()
+{
+	err -cm "$@"
+	trap "sigquit; exit" EXIT
+	exit $FAILURE
+}
+
+# msg format [args ...]
+#
+# If debug logging is enabled, log the supplied message text.
+#
+msg()
+{
+	[ ! "$DEBUG" ] || err "$@"
+}
+
+# in_use port
+#
+# Check if port is already being listened-on locally.
+#
+case "$UNAME_s" in
+Linux)
+in_use()
+{
+	netstat -an | grep -q ":$SIGPORT .* LISTEN"
+}
+;;
+*) # FreeBSD
+in_use()
+{
+	netstat -an | grep -q "\\.$SIGPORT .* LISTEN"
+}
+esac
+
+# chkip ipaddr ...
+#
+# Check to see if the supplied IP address(es) are responding.
+#
+chkip()
+{
+	local funcname=ckip
+	local ip
+	for ip in $*; do
+		msg "%s: checking %s" "$funcname" "$ip"
+		ping -c 1 -W 2 $ip > /dev/null 2>&1 || continue
+		msg "%s: successful ping of %s" "$funcname" "$ip"
+		return $SUCCESS
+	done
+	msg "%s: failed to ping %s" "$funcname" "$*"
+	return $FAILURE
+}
+
+# prccmd expr
+#
+# Process a user-supplied command.
+#
+prccmd()
+{
+	local funcname=prccmd
+	local cmd="$1"
+
+	cmd=$( echo "$cmd" | sed -e "s/IPADDR/$IPADDR/g" )
+	msg "%s: %s" "$funcname" "$cmd"
+	( eval timeout "${TIMEOUT}s" "$cmd" > /dev/null 2>&1 )
+}
+
+# ip_dev ipaddr
+#
+# Print name of network interface with ipaddr assigned.
+#
+case "$UNAME_s" in
+Linux)
+ip_dev()
+{
+	ifconfig -a | awk -v ip="$1" '
+		/^[^[:space:]]/ && dev = $1 { next }
+		$1 == "inet" && inet = $2 {
+			sub(/^addr:/, "", inet)
+			if (inet == ip) {
+				print dev
+				exit found = 1
+			}
+		}
+		END { exit !found }
+	' # END-QUOTE
+}
+;;
+*) # FreeBSD
+ip_dev()
+{
+	ifconfig | awk -v ip="$1" '
+		/^[^[:space:]]/ && dev = $1 {
+			sub(/:$/, "", dev)
+			next
+		}
+		$1 == "inet" && inet = $2 {
+			if (inet == ip) {
+				print dev
+				exit found = 1
+			}
+		}
+		END { exit !found }
+	' # END-QUOTE
+}
+esac
+
+# default_gw
+#
+# Print the default gateway address.
+#
+case "$UNAME_s" in
+Linux)
+default_gw()
+{
+	route -n | awk '$4~/G/{print $2;exit found=1}END{exit !found}'
+}
+;;
+*) # FreeBSD
+default_gw()
+{
+	route -n get default |
+		awk '$1=="gateway:"{print $2;exit found=1}END{exit !found}'
+}
+esac
+
+# nameserver
+#
+# Print the name of the primary nameserver from resolv.conf(5).
+#
+nameserver()
+{
+	awk '$1=="nameserver"{print $2;exit found=1}END{exit !found}' \
+		/etc/resolv.conf
+}
+
+# if_list
+#
+# Print a list of (non-loopback) network interface device names.
+#
+case "$UNAME_s" in
+Linux)
+if_list()
+{
+	ifconfig -a | awk '
+		/^[^[:space:]]/ { sub(/:.*/, ""); ifs[$1] = 1 }
+		END {
+			for (iface in ifs)
+				if (iface !~ /^lo/) list = list " " iface
+			print substr(list, 2)
+		}
+	' # END-QUOTE
+}
+;;
+*) # FreeBSD
+if_list()
+{
+	ifconfig -l | awk '{
+		gsub(/[[:space:]]*lo[0-9][^[:space:]]*[[:space:]]*/, " ")
+		gsub(/[[:space:]]+/, " ")
+		sub(/^[[:space:]]*/, "")
+	}1' # END-QUOTE
+}
+esac
+
+# if_active iface
+#
+# Return success if iface is active (link detected).
+#
+case "$UNAME_s" in
+Linux)
+if_active()
+{
+	ethtool "$1" 2> /dev/null | awk '
+		/Link detected:/ { exit active = $3 == "yes" }
+		END { exit !active }
+	' # END-QUOTE
+}
+;;
+*) # FreeBSD
+if_active()
+{
+	case "$1" in
+	lo[0-9]*) return 0 ;;
+	esac
+	ifconfig "$1" 2> /dev/null | awk '
+		/status:/ { exit active = $2 == "active" }
+		END { exit !active }
+	' # END-QUOTE
+}
+esac
+
+# if_mask iface
+#
+# Print netmask to use for aliases applied to iface.
+# NB: Unused on FreeBSD but populated for posterity.
+#
+case "$UNAME_s" in
+Linux)
+if_mask()
+{
+	ifconfig "$1" 2> /dev/null | awk '
+		$1 == "inet" && sub(/^Mask:/, "", $NF) {
+			print $NF
+			exit found = 1
+		}
+		END { exit !found }
+	' # END-QUOTE
+}
+;;
+*) # FreeBSD
+if_mask()
+{
+	echo 255.255.255.255
+}
+esac
+
+# apply_alias iface ipaddr netmask
+#
+# Apply ipaddr alias to iface.
+# NB: netmask unused on FreeBSD.
+#
+case "$UNAME_s" in
+Linux)
+apply_alias()
+{
+	local funcname=apply_alias
+	local iface="$1" alias_ip="$2" alias_mask="$3"
+	local alias_num error
+
+	# Determine device to use
+	msg "%s: determining ethernet device to use" "$funcname"
+	alias_num=$( ifconfig -a | awk -v dev="$iface" '
+		sub("^" dev ":", "") {
+			aliases[$1] = 1
+			if ($1 > peak) peak = $1
+		}
+		END { print peak + 1 }
+	' )
+	msg "%s: using %s:%u" "$funcname" "$iface" "$alias_num"
+
+	# Alias
+	if ! error=$( ifconfig "$iface:$alias_num" \
+		"$alias_ip" netmask "$alias_mask" up )
+	then
+		err -m "%s: ifconfig: %s" "$funcname" "$error"
+		return $FAILURE
+	fi
+	arping -I "$iface:$alias_num" -c5 -U -A "$alias_ip" > /dev/null 2>&1
+	err -m "aliased IP address to %s:%u" "$iface" "$alias_num"
+}
+;;
+*) # FreeBSD
+apply_alias()
+{
+	local funcname=apply_alias
+	local iface="$1" alias_ip="$2"
+	local error
+
+	# Alias
+	if ! error=$( ifconfig "$iface" alias "$alias_ip/32" 2>&1 ); then
+		err -m "%s: ifconfig: %s" "$funcname" "$error"
+		return $FAILURE
+	fi
+	arping -i "$iface" -c5 -U -P -S "$alias_ip" -B > /dev/null 2>&1
+	err -m "aliased IP address to %s" "$iface"
+}
+esac
+
+# http_get url
+#
+# Print contents of remote url.
+#
+if type fetch > /dev/null 2>&1; then
+http_get(){ fetch -qo- "$@"; }
+elif type wget > /dev/null 2>&1; then
+http_get(){ wget -qO- "$@"; }
+elif type curl > /dev/null 2>&1; then
+http_get(){ curl -qLo- "$@"; }
+else
+http_get(){ die "Unable to make HTTP GET requests"; }
+fi
+
+# aws ...
+#
+# Wrapper to aws tool from awscli package.
+#
+aws()
+{
+	local err rv
+	err=$( AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+		AWS_SECRET_ACCESS_KEY="$AWS_ACCESS_KEY_SECRET" \
+		AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+		command aws "$@" 2>&1 )
+	rv=$?
+	[ $rv -eq $SUCCESS ] || die "%s" "$err"
+	echo "$err"
+	return $rv
+}
+
+# json key
+#
+# Print value of key from JSON provided on stdin.
+#
+json()
+{
+	awk -v key="$1" '
+		BEGIN { key = tolower(key) }
+		tolower($1) == "\"" key "\":" {
+			id = $2
+			sub(/^"/, "", id)
+			sub(/",?$/, "", id)
+			print id
+			exit found = 1
+		}
+		END { exit !found }
+	' # END-QUOTE
+}
+
+# take_elastic_ip eip_allocation_id
+#
+# Update Amazon Elastic IP (EIP) to point at EC2 instance.
+#
+take_elastic_ip()
+{
+	local eip_alloc="$1"
+	local eip_descr eip_assoc
+	local self_inst
+
+	# Dis/Associate
+	eip_descr=$( aws ec2 describe-addresses --allocation-id "$eip_alloc" )
+	eip_assoc=$( echo "$eip_descr" | json AssociationId ) &&
+		aws ec2 disassociate-address --association-id "$eip_assoc"
+	self_inst=$( http_get $AWS_API_INSTANCE_ID )
+	aws ec2 associate-address --allocation-id "$eip_alloc" \
+		--instance-id "$self_inst"
+	err -m "associated Elastic IP address with %s" "$self_inst"
+}
+
+# remove_alias iface ipaddr
+#
+# Remove ipadr alias from iface.
+# NB: ipaddr is unused on Linux.
+#
+case "$UNAME_s" in
+Linux)
+remove_alias()
+{
+	local iface="$1"
+
+	# Release IP address
+	ifconfig "$iface" down
+
+	err -m "released %s" "$dev"
+}
+;;
+*) # FreeBSD
+remove_alias()
+{
+	local iface="$1" alias_ip="$2"
+
+	# Release IP address
+	ifconfig "$iface" -alias "$alias_ip"
+
+	err -m "released %s alias %s" "$iface" "$alias_ip"
+}
+esac
+
+# release_elastic_ip eip_allocation_id
+#
+# Disassociate Amazon Elastic IP (EIP) from EC2 instnace.
+#
+release_elastic_ip()
+{
+	local eip_alloc="$1"
+	local eip_descr eip_assoc eip_inst
+	local self_inst
+
+	# Disassociate
+	eip_descr=$( aws ec2 describe-addresses --allocation-id "$eip_alloc" )
+	if eip_assoc=$( echo "$eip_descr" | json AssociationId ); then
+		eip_inst=$( echo "$eip_descr" | json InstanceId )
+		self_inst=$( http_get $AWS_API_INSTANCE_ID )
+		[ "$eip_inst" = "$self_inst" ] || return $FAILURE
+		aws ec2 disassociate-address --association-id "$eip_assoc"
+		err -m "disassociated Elastic IP address from %s" "$self_inst"
+	fi
+	return $SUCCESS
+}
+
+# is_master
+#
+# Returns success if this machine is currently the master.
+#
+is_master()
+{
+	local eip_alloc="$AWS_EIP_ALLOCATION_ID"
+	local eip_descr eip_inst
+	local self_inst
+
+	if [ ! "$eip_alloc" ]; then
+		ip_dev "$IPADDR" > /dev/null
+		return
+	fi
+
+	eip_descr=$( aws ec2 describe-addresses --allocation-id "$eip_alloc" )
+	eip_inst=$( echo "$eip_descr" | json InstanceId )
+	self_inst=$( http_get $AWS_API_INSTANCE_ID )
+	[ "$eip_inst" = "$self_inst" ]
+}
+
+# failover
+#
+# Process a failover condition and determine the course of action based on
+# whether the IP address is local or not.
+#
+failover()
+{
+	local funcname=failover
+	local dev
+	msg "entering %s" "$funcname"
+
+	# Determine if we hold the shared/elastic IP
+	if is_master; then
+		# Release the shared/elastic IP
+		if [ "$AWS_EIP_ALLOCATION_ID" ]; then
+			msg "%s: releasing Elastic IP %s" "$funcname" \
+				"$AWS_EIP_ALLOCATION_ID"
+			release_elastic_ip "$AWS_EIP_ALLOCATION_ID"
+		else
+			dev=$( ip_dev "$IPADDR" )
+			msg "%s: releasing IP address on %s" "$funcname" "$dev"
+			remove_alias "$dev" "$IPADDR"
+		fi
+
+		# Give a server a chance before stealing it back
+		msg "%s: prevent flapping by sleeping %u seconds" \
+			"$funcname" "$FLAP"
+		sleep "$FLAP"
+
+		return
+	fi
+
+	# Remotely controlled IP address
+	msg "%s: IP address %s is remote" "$funcname" "$IPADDR"
+
+	# Determine if the $IPADDR is responsive or not
+	if chkip "$IPADDR"; then
+		# Responsive ... send signal to release
+		if [ $SIGRECV -gt 1 ]; then
+			msg "%s: sending SIGUSR2 to %s" "$funcname" "$IPADDR"
+			echo SiGuSr2 | nc -w "$TIMEOUT" "$IPADDR" "$SIGPORT"
+		else
+			msg "%s: sending SIGUSR1 to %s" "$funcname" "$IPADDR"
+			echo SiGuSr1 | nc -w "$TIMEOUT" "$IPADDR" "$SIGPORT"
+		fi
+
+		# Give the master time to release the IP address
+		msg "%s: allow release of IP address sleeping %u seconds" \
+			"$funcname" "$INTERVAL"
+		sleep "$INTERVAL"
+	fi
+
+	# Check for a command to execute before aliasing
+	if [ "$PREIP_CMD" ]; then
+		msg "%s: found command to execute on hot spare" "$funcname"
+		if prccmd "$PREIP_CMD"; then
+			msg "%s: executed pre-aliasing command" "$funcname"
+		else
+			err -m "%s: pre-aliasing command failed" "$funcname"
+		fi
+	fi
+
+	# Assign the shared IP address
+	if [ "$AWS_EIP_ALLOCATION_ID" ]; then
+		take_elastic_ip "$AWS_EIP_ALLOCATION_ID"
+	else
+		apply_alias "$DEVICE" "$IPADDR" "$NETMASK"
+	fi
+
+	# Check for a command to execute before aliasing
+	if [ "$POSTIP_CMD" ]; then
+		msg "%s: found command to execute on hot spare" "$funcname"
+		if prccmd "$POSTIP_CMD"; then
+			msg "%s: executed post-aliasing command" "$funcname"
+		else
+			err -m "%s: post-aliasing command failed" "$funcname"
+		fi
+	fi
+
+	# Give a server a chance before stealing it back
+	msg "%s: prevent flapping by sleeping %u seconds" "$funcname" "$FLAP"
+	sleep "$FLAP"
+}
+
+# sigsock
+#
+# Persistent child process (smite listener).
+#
+sigsock()
+{
+	local funcname=sigsock
+	local sig
+	msg "entering %s" "$funcname"
+
+	while :; do
+		sig=$( nc -l "$SIGPORT" )
+		case "$sig" in
+		SiGuSr1) msg "%s: received SIGUSR1" "$funcname"
+			kill -USR1 $$ ;;
+		SiGuSr2) msg "%s: received SIGUSR2" "$funcname"
+			kill -USR2 $$ ;;
+		*) err "%s: received unknown signal: '%s'" "$funcname" "$sig"
+		esac
+	done
+}
+
+# sigquit
+#
+# Signal handler for EXIT pseudo-signal. Executed before program termination.
+#
+sigquit()
+{
+	local funcname=sigquit
+	msg "entering %s" "$funcname"
+
+	[ "$CHILD" ] && kill -9 "$CHILD" 2> /dev/null
+	echo | nc -w "$TIMEOUT" localhost "$SIGPORT"
+
+	rm -f "$PIDFILE"
+}
+
+# sigusr1
+#
+# Signal handler for SIGUSR1. Initiates a failover.
+#
+sigusr1()
+{
+	local funcname=sigusr1
+	msg "entering %s" "$funcname"
+
+	if [ $SIGMASK -eq 0 ]; then
+		err "sigmask is set returning"
+		return
+	fi
+
+	if [ $SIGRECV -ne 2 ]; then
+		msg "%s: setting sigrecv (%u) to 1" "$funcname" "$SIGRECV"
+		SIGRECV=1
+	fi
+
+	# Mask signals from interrupting the process
+	msg "%s: masking signals" "$funcname"
+	SIGMASK=0
+	msg "%s: setting immediate failover" "$funcname"
+	RCNT=$RETRIES # immediate failover
+	msg "%s: executing failover" "$funcname"
+	failover
+	RCNT=1 # reset
+	SIGMASK=1
+	msg "%s: unmasking signals" "$funcname"
+
+	# Clear
+	msg "%s: clearing sigrecv" "$funcname"
+	SIGRECV=0
+}
+
+# sigusr2
+#
+# Signal handler for SIGUSR2. Initiates termination.
+#
+sigusr2()
+{
+	local funcname=sigusr2
+	msg "entering %s" "$funcname"
+
+	# If needed, notify the remote to die
+	msg "%s: setting sigrecv to 2" "$funcname"
+	SIGRECV=2
+	msg "%s: executing sigurs1" "$funcname"
+	sigusr1
+
+	msg "%s: exiting" "$funcname"
+	exit $SUCCESS
+}
+
+# sighup
+#
+# Signal handler for SIGHUP.
+#
+# NB: Received when newsyslog(8) rotates LOGFILE on FreeBSD.
+#
+sighup()
+{
+	local funcname=sighup
+	msg "%s: caught hangup signal" "$funcname"
+
+	msg "%s: checking log file %s" "$funcname" "$LOGFILE"
+	if [ ! -e "$LOGFILE" ]; then
+		msg "%s: log file %s rotated (recreating)" \
+			"$funcname" "$LOGFILE"
+		:>> "$LOGFILE" 2> /dev/null
+		case "$UNAME_s" in
+		FreeBSD)
+			msg "%s: reloading syslogd"
+			service syslogd reload > /dev/null 2>&1 ||: ;;
+		esac
+	fi
+
+	msg "%s: signal handler complete"
+	return $SUCCESS
+}
+
+############################################################ MAIN
+
+#
+# Process command-line options
+#
+while getopts "df:hnSV?" opt; do
+	case "$opt" in
+	d) DEBUG=$(( $DEBUG + 1 )) ;;
+	f) CONF="$OPTARG" ;;
+	n) NOMAIL=1 ;;
+	S) kill -USR2 "$( cat "$PIDFILE" )"
+	   exit ;;
+	V) vers="${VERSION#\$Version}"
+	   vers="${vers#: }"
+	   vers="${vers%\$}"
+	   vers="${vers% }"
+	   echo "$vers"
+	   exit ;;
+	*) usage # NOTREACHED
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+#
+# Required settings
+#
+if [ ! "$ADMIN" ]; then
+	err -c "FATAL: must set ADMIN"
+	exit $FAILURE
+fi
+
+#
+# Source configuration file
+#
+msg "checking config file syntax"
+if ! error=$( sh -n "$CONF" 2>&1 > /dev/null ); then
+	# Taint-checking inside a sub-shell failed
+	die "cannot process the configuration file '%s'\n\n%s" "$CONF" "$error"
+fi
+msg "sourcing config file"
+. "$CONF" 2> /dev/null || 
+	die "cannot process the configuration file '%s'" "$CONF"
+
+#
+# Admin must still be set after loading config (affects die routine)
+#
+if [ ! "$ADMIN" ]; then
+	err -c "FATAL: must set ADMIN in configuration file"
+	exit $FAILURE
+fi
+
+#
+# Validate config settings
+#
+[ "$INTERVAL" = "${INTERVAL#*[^0-9]}" ] || die "INTERVAL must be a number"
+[ "$IPADDR" -o "$AWS_EIP_ALLOCATION_ID" ] ||
+	die "FATAL: must set IPADDR or AWS_EIP_ALLOCATION_ID"
+[ "$RETRIES" = "${RETRIES#*[^0-9]}" ] || die "RETRIES must be a number"
+[ "$SIGPORT" = "${SIGPORT#*[^0-9]}" ] || die "SIGPORT must be a number"
+[ "$TIMEOUT" = "${TIMEOUT#*[^0-9]}" ] || die "TIMEOUT must be a number"
+
+#
+# Validate AWS settings if EIP is configured
+#
+if [ "$AWS_EIP_ALLOCATION_ID" ]; then
+	[ "$AWS_ACCESS_KEY_ID" ] || die "must set AWS_ACCESS_KEY_ID"
+	[ "$AWS_ACCESS_KEY_SECRET" ] || die "must set AWS_ACCESS_KEY_SECRET"
+	[ "$AWS_DEFAULT_REGION" ] || die "must set AWS_DEFAULT_REGION"
+
+	# Verify we are running in AWS
+	msg "testing access to AWS instance-data"
+	http_get $AWS_API_INSTANCE_ID > /dev/null 2>&1 || die "AWS API error"
+
+	# Get a description of the Elastic IP
+	msg "testing awscli access key/secret"
+	eip_descr=$( aws ec2 describe-addresses \
+		--allocation-id "$AWS_EIP_ALLOCATION_ID" 2>&1 ) ||
+		die "awscli error\n%s" "$eip_descr"
+
+	# Get the IP address from the EIP description
+	IPADDR=$( echo "$eip_descr" | json PublicIp ) ||
+		die "%s has no IP address" "$AWS_EIP_ALLOCATION_ID"
+fi
+
+#
+# Handle status
+#
+if [ "$1" = status ]; then
+	if [ "$AWS_EIP_ALLOCATION_ID" ]; then
+		note=" ($AWS_EIP_ALLOCATION_ID)"
+	else
+		name=$( host "$IPADDR" 2> /dev/null |
+			awk '{sub(/\.$/, "", $NF)}$0=$NF' )
+		note=" ($name)"
+	fi
+	if is_master; then
+		echo "I am master for $IPADDR$note"
+	else
+		echo "I am spare for $IPADDR$note"
+	fi
+	exit $SUCCESS
+fi
+
+#
+# Intelligent defaults for required settings
+#
+if [ ! "$TESTADDR" ]; then # Try default gateway else primary nameserver
+	msg "TESTADDR unset; trying default gw and primary ns"
+	if TESTADDR=$( default_gw ) && chkip "$TESTADDR"; then
+		msg "TESTADDR=%s (default gw)" "$TESTADDR"
+	elif TESTADDR=$( nameserver ) && chkip "$TESTADDR"; then
+		msg "TESTADDR=%s (primary ns)" "$TESTADDR"
+	else
+		die "FATAL: must set TESTADDR"
+	fi
+fi
+if [ ! "$DEVICE" ]; then # Try to use single active interface
+	msg "DEVICE unset; OK if only one active interface"
+	n=0 active=
+	list=$( if_list )
+	for iface in $list; do
+		if_active $iface || continue
+		active="$active $iface"
+		n=$(( $n + 1 ))
+		[ $n -gt 1 ] && break
+	done
+	active="${active# }"
+	[ $n -eq 1 ] || die "FATAL: must set DEVICE; %s" \
+		"$n active interfaces [$active]"
+	DEVICE=$active
+	msg "DEVICE=%s" "$DEVICE"
+fi
+if [ ! "$NETMASK" ]; then
+	msg "NETMASK unset; OK when DEVICE is known"
+	NETMASK=$( if_mask "$DEVICE" ) || die "FATAL: must set NETMASK"
+	msg "NETMASK=%s" "$NETMASK"
+fi
+
+#
+# Ensure only one copy is running at a time
+#
+msg "setup: checking if PID file exists"
+if [ -e "$PIDFILE" ]; then
+	msg "setup: PID file exists, checking contents"
+	pid=$( cat "$PIDFILE" 2>&1 ) || die "%s: %s" "$PIDFILE" "$pid"
+	if kill -0 "$pid" 2> /dev/null; then
+		ucomm=$( ps -o ucomm= -p "$pid" 2> /dev/null )
+		[ "$ucomm" = sh ] && die "PID %u already running" "$PIDFILE"
+	fi
+	rm -f "$PIDFILE" # stale contents
+fi
+msg "setup: creating PID file"
+clobber=
+[ "$-" = "${-#*C}" ] && clobber=1
+set -C
+echo $$ > "$PIDFILE" || die "could not create PID file, '%s'" "$PIDFILE"
+[ "$clobber" ] && set +C
+unset clobber
+
+#
+# Traps
+#
+msg "setup: setting signal traps"
+trap "err -m exiting; sigquit; exit" EXIT
+trap sighup SIGHUP
+trap "sigquit; exit" SIGINT SIGQUIT SIGTERM
+trap sigusr1 SIGUSR1
+trap sigusr2 SIGUSR2
+msg "setup done"
+
+#
+# Spawn child smite listener
+#
+msg "spawning child listener on %u" "$SIGPORT"
+in_use "$SIGPORT" && die "FATAL: %u in use" "$SIGPORT"
+sigsock &
+CHILD=$!
+
+#
+# Start the main loop
+#
+msg "starting main loop"
+while :; do
+	msg "checking local process"
+	if ! prccmd "$LOCAL_TEST_CMD"; then
+		msg "local loop: check failed"
+
+		# Local process is down
+		tomail=
+		if [ $THROTTLE -eq 0 ]; then
+			tomail=-m
+			THROTTLE=1
+		fi
+		err $tomail "local process down"
+
+		sleep "$INTERVAL"
+		continue
+	fi
+	msg "local: check succeeded"
+
+	# Reset the mail throttle
+	msg "local: success: resetting mail throttle"
+	THROTTLE=0
+
+	#
+	# Start the monitor loop
+	#
+	msg "local: success: starting monitor loop"
+	while :; do
+		if prccmd "$REMOTE_TEST_CMD"; then
+			if [ $THROTTLE -ne 0 ]; then
+				msg "monitor: success: resetting mail throttle"
+				THROTTLE=0 # Reset the network mail throttle
+			fi
+			if [ $RCNT -ne 1 ]; then
+				msg "monitor: success: %s" \
+					"resetting retries counter"
+				RCNT=1 # Reset the retries counter
+			fi
+
+			sleep "$INTERVAL"
+			continue
+		fi
+		msg "monitor: check failed"
+
+		msg "monitor: failed: check test IP addresses: %s" \
+			"$TESTADDR"
+		if ! chkip "$TESTADDR"; then
+			msg "monitor: failed: test IP addresses check failed"
+
+			# Network offline
+			if [ $THROTTLE -eq 0 ]; then
+				err -m "network offline"
+				THROTTLE=1
+			fi
+
+			sleep "$INTERVAL"
+			continue
+		fi
+		msg "monitor: failed: test IP addresses check succeeded"
+
+		# Network online
+		msg "monitor: failed: success: retry count %u, retries %u" \
+			"$RCNT" "$RETRIES"
+		if [ $RCNT -lt $RETRIES ]; then
+			RCNT=$(( $RCNT + 1 ))
+			msg "monitor: sleep %u" "$INTERVAL"
+			sleep "$INTERVAL"
+			continue
+		fi
+
+		msg "monitor: failed: success: rcnt -ge retries"
+
+		# Mask SIGUSR1 and SIGUSR2
+		msg "monitor: failed: success: mask signals"
+		SIGMASK=0
+		msg "monitor: failed: success: execute failover"
+		failover
+		RCNT=1 # reset
+		SIGMASK=1
+		msg "monitor: failed: success: unmask signals"
+		msg "monitor: failed: break to local loop"
+		break
+	done
+done
+
+exit $SUCCESS
+
+################################################################################
+# END
+################################################################################
