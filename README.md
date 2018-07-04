@@ -1,4 +1,4 @@
-[//]: # ($FrauBSD: smite/README.md 2018-07-04 00:30:04 +0000 freebsdfrau $)
+[//]: # ($FrauBSD: smite/README.md 2018-07-04 00:31:26 +0000 freebsdfrau $)
 
 # smite
 
@@ -25,26 +25,32 @@ This will ensure the FrauBSD keyword is expanded/updated for each commit.
 ### On Linux
 
 > `# service rsyslog restart`
+
 > `# chkconfig smite on`
+
 > `# cd /etc`
 
 ### On FreeBSD
 
 > `#service syslogd reload`
+
 > `#sysrc smite_enable=YES`
+
 > `#cd /usr/local/etc`
 
 ### Then
 
 > Copy one of `smite.conf.*` to `smite.conf`
+
 > Edit `smite.conf`
+
 > Edit `/usr/local/bin/*test` if necessary
 
 # Starting (as root)
 
 > `# service smite start`
 
-> or for additional debugging in `/var/log/smite.log`
+or for additional debugging in `/var/log/smite.log`
 
 > `# service smite debug`
 
@@ -56,6 +62,6 @@ This will ensure the FrauBSD keyword is expanded/updated for each commit.
 
 > `# service smite stop`
 
-> or to stop without sending mail to ADMIN e-mail address
+or to stop without sending mail to ADMIN e-mail address
 
 > `# service smite kill`
