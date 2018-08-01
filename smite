@@ -30,7 +30,7 @@
 # $Title: HA daemon for active/passive IP sharing $
 # $Copyright: 2013-2018 Smule, Inc. All rights reserved. $
 # $Copyright: 2018 The FrauBSD Project. All rights reserved. $
-# $FrauBSD: smite/smite 2018-07-04 06:31:02 +0000 freebsdfrau $
+# $FrauBSD: smite/smite 2018-08-01 14:50:33 -0700 freebsdfrau $
 #
 ############################################################ INFORMATION
 #
@@ -201,7 +201,7 @@ usage()
 	exit $FAILURE
 }
 
-# err [-em] format [args ...]
+# err [-cm] format [args ...]
 #
 # Log error message text. Uses printf syntax.
 # Options:
@@ -230,7 +230,7 @@ err()
 
 	logger -p "$PRI" -t "$TAG" "$msg"
 	[ "$tocons" ] && printf "%s: $fmt\n" "$TAG" "$@"
-	if [ "$tomail" ]; then
+	if [ "$tomail" -a "$ADMIN" ]; then
 		local mailout="$SENDMAIL" subject
 		subject=$( printf "%s: %s: %s\n" "$HOSTNAME" "$TAG" "$msg" |
 			awk 'BEGIN { getline; print; exit }' )
@@ -891,14 +891,6 @@ done
 shift $(( $OPTIND - 1 ))
 
 #
-# Required settings
-#
-if [ ! "$ADMIN" ]; then
-	err -c "FATAL: must set ADMIN"
-	exit $FAILURE
-fi
-
-#
 # Source configuration file
 #
 msg "checking config file syntax"
@@ -909,6 +901,14 @@ fi
 msg "sourcing config file"
 . "$CONF" 2> /dev/null || 
 	die "cannot process the configuration file '%s'" "$CONF"
+
+#
+# Required settings
+#
+if [ ! "$ADMIN" ]; then
+	err -c "FATAL: must set ADMIN"
+	exit $FAILURE
+fi
 
 #
 # Admin must still be set after loading config (affects die routine)
